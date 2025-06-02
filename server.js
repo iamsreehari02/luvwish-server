@@ -9,10 +9,9 @@ import corsOptions from "./src/config/cors.js";
 dotenv.config();
 const app = express();
 
-app.use(cors());
+app.use(cookieParser());
 app.use(express.json());
 app.use(cors(corsOptions));
-app.use(cookieParser());
 
 app.use("/api", routes);
 

@@ -36,6 +36,11 @@ export const loginUser = async ({ email, password }) => {
   return { user, token };
 };
 
+export const getUserById = async (id) => {
+  const user = await User.findById(id).select("-password");
+  return user;
+};
+
 export const sendResetOtp = async (email) => {
   const user = await User.findOne({ email });
   if (!user) throw new Error("No user found with this email");

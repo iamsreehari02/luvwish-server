@@ -4,6 +4,7 @@ import {
   sendResetOtp,
   verifyOtp,
   resetPassword,
+  getUserById,
 } from "../services/auth.js";
 import { setAuthCookie } from "../utils/cookies.js";
 
@@ -34,6 +35,17 @@ export const signin = async (req, res) => {
     res.status(200).json({ message: "Login successful", user });
   } catch (err) {
     res.status(401).json({ error: err.message });
+  }
+};
+
+export const getLoggedInUser = async (req, res) => {
+  try {
+    const user = await getUserById(req.userId);
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    res.status(200).json({ user });
+  } catch (err) {
+    res.status(500).json({ message: "Server error", error: err.message });
   }
 };
 
