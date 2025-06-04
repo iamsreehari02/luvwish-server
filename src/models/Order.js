@@ -11,7 +11,6 @@ const orderSchema = new mongoose.Schema(
       ref: "Address",
       required: true,
     },
-    shippingAddress: { type: mongoose.Schema.Types.ObjectId, ref: "Address" },
     items: [
       {
         product: { type: mongoose.Schema.Types.ObjectId, ref: "Product" },
@@ -24,6 +23,13 @@ const orderSchema = new mongoose.Schema(
       type: String,
       enum: ["pending", "shipped", "delivered"],
       default: "pending",
+    },
+
+    pdfInvoice: {
+      type: Buffer,
+    },
+    pdfInvoiceMimeType: {
+      type: String,
     },
   },
   { timestamps: true }

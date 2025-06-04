@@ -36,14 +36,14 @@ export const orderConfirmationTemplate = (order) => `
         2
       )}</p>
 
-      <h3 style="color: #d63384; border-bottom: 1px solid #eee; padding-bottom: 5px;">📦 Shipping Address</h3>
+     <h3 style="color: #d63384; border-bottom: 1px solid #eee; padding-bottom: 5px;">📍 Billing Address</h3>
       <p style="font-size: 15px; color: #555;">
-        ${order.shippingAddress?.street || ""},<br />
-        ${order.shippingAddress?.houseNumber || ""},<br />
-        ${order.shippingAddress?.location || ""} - ${
-  order.shippingAddress?.postcode || ""
+      ${order.billingAddress?.street || ""},<br />
+      ${order.billingAddress?.houseNumber || ""},<br />
+      ${order.billingAddress?.location || ""} - ${
+  order.billingAddress?.postcode || ""
 }
-      </p>
+    </p>
 
       <div style="margin-top: 30px; background-color: #fff0f5; padding: 20px; border-radius: 10px;">
         <p style="color: #a8326d; font-size: 15px;">

@@ -5,8 +5,9 @@ export const addProductHandler = async ({
   description,
   price,
   image,
+  kitItems,
 }) => {
-  const product = new Product({ name, description, price, image });
+  const product = new Product({ name, description, price, image, kitItems });
   return await product.save();
 };
 

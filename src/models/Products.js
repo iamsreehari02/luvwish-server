@@ -18,6 +18,12 @@ const productSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    kitItems: [
+      {
+        name: { type: String, required: true },
+        quantity: { type: Number, default: 1 },
+      },
+    ],
     inStock: {
       type: Boolean,
       default: true,

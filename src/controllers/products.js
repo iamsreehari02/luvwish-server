@@ -6,14 +6,17 @@ import {
 
 export const addProduct = async (req, res) => {
   try {
-    const { name, description, price } = req.body;
+    const { name, description, price, kitItems } = req.body;
     const image = req.file?.path;
+
+    const parsedKitItems = kitItems ? JSON.parse(kitItems) : [];
 
     const product = await addProductHandler({
       name,
       description,
       price,
       image,
+      kitItems: parsedKitItems,
     });
 
     res.status(201).json(product);

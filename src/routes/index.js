@@ -5,6 +5,9 @@ import userRoutes from "./user.js";
 import orderRoutes from "./order.js";
 import promoRoutes from "./promo.js";
 import authRoutes from "./auth.js";
+// import paymentRoutes from "./payment.js";
+import contactMessageRoutes from "./contactMessage.js";
+import contactUsRoutes from "./contact.js";
 
 const router = express.Router();
 
@@ -14,5 +17,8 @@ router.use("/user", userRoutes);
 router.use("/orders", orderRoutes);
 router.use("/promo", promoRoutes);
 router.use("/auth", authRoutes);
+// router.use("/payment", paymentRoutes);
+router.use("/contact-message", contactMessageRoutes);
+router.use("/contact-us", contactUsRoutes);
 
 export default router;
