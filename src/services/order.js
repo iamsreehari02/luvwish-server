@@ -107,7 +107,10 @@ export const placeOrder = async (
   shippingCharge,
   session = null,
   coinsUsed = 0,
-  paymentStatus = "pending"
+  paymentStatus = "pending",
+  orderNumber,
+  cartItems = null,
+  paymentDetails = {} // New: {razorpayOrderId, paymentId}
 ) => {
   try {
     const billingAddress = await Address.findById(billingAddressId);
@@ -120,17 +123,23 @@ export const placeOrder = async (
       throw new Error(`User not found: ${userId}`);
     }
 
-    const cartItems = await getCartItems(userId);
+    if (!cartItems) {
+      cartItems = await getCartItems(userId);
+    }
+
     if (!cartItems || cartItems.length === 0) {
       throw new Error("Cart is empty");
+    }
+
+    if (!Array.isArray(cartItems)) {
+      console.error("[placeOrder] cartItems NOT an array:", cartItems);
+      cartItems = [];
     }
 
     const cartTotal = cartItems.reduce(
       (total, item) => total + item.price * item.quantity,
       0
     );
-
-    // Final total:
     const finalTotal = cartTotal + shippingCharge - coinsUsed;
 
     const order = new Order({
@@ -139,7 +148,7 @@ export const placeOrder = async (
       billingAddress: billingAddressId,
       phoneNumber: billingAddress.phoneNumber,
       title: billingAddress.title,
-      orderNumber: generateOrderNumber(),
+      orderNumber,
       items: cartItems.map((item) => ({
         product: item.productId,
         quantity: item.quantity,
@@ -150,6 +159,9 @@ export const placeOrder = async (
       shippingCharge,
       totalAmount: finalTotal,
       createdAt: new Date(),
+      razorpayOrderId: paymentDetails.razorpayOrderId || undefined,
+      paymentId: paymentDetails.paymentId || undefined,
+      status: paymentStatus === "paid" ? "pending" : "pending",
     });
 
     const savedOrder = session

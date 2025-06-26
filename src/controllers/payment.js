@@ -15,6 +15,7 @@ import { calculateShippingCharge } from "../utils/shippingChargeCalculator.js";
 import Address from "../models/Address.js";
 import mongoose from "mongoose";
 import { generateOrderNumber } from "../utils/generateOrderNumber.js";
+import { clearUserCart } from "../utils/clearCart.js";
 
 export const createRazorpayOrder = async (req, res) => {
   try {
@@ -40,9 +41,9 @@ export const createRazorpayOrder = async (req, res) => {
       (total, item) => total + item.price * item.quantity,
       0
     );
+
     const inKerala = isKerala(billingData);
     const shippingCharge = calculateShippingCharge(cartItems, inKerala);
-
     const totalBeforeDiscount = amount + shippingCharge;
     const minOrderAmount = 1;
     const maxAllowedCoinDiscount = totalBeforeDiscount - minOrderAmount;
@@ -50,7 +51,7 @@ export const createRazorpayOrder = async (req, res) => {
     if (coinsUsed < 0 || coinsUsed > user.coins) {
       return res
         .status(400)
-        .json({ error: "Invalid coin amount. You don’t have enough coins." });
+        .json({ error: "Invalid coin amount. You don't have enough coins." });
     }
 
     const coinDiscount = Math.min(coinsUsed, maxAllowedCoinDiscount);
@@ -76,7 +77,6 @@ export const createRazorpayOrder = async (req, res) => {
     }
 
     let billingAddressId = billingData.addressId;
-
     if (!billingAddressId) {
       const newAddress = new Address({
         user: user._id,
@@ -96,11 +96,13 @@ export const createRazorpayOrder = async (req, res) => {
       billingAddressId = newAddress._id;
     }
 
+    // Pass cartItems to createOrder function
     const razorpayOrder = await createOrder(
       amountInPaise,
       user._id,
       coinsUsed,
-      billingAddressId
+      billingAddressId,
+      cartItems // Pass cart items here
     );
 
     res.status(200).json({
@@ -137,6 +139,22 @@ export const verifyPaymentAndPlaceOrder = async (req, res) => {
 
     if (generatedSignature !== razorpay_signature) {
       return res.status(400).json({ error: "Invalid payment signature" });
+    }
+
+    const existingRazorpayOrder = await Order.findOne({
+      razorpayOrderId: razorpay_order_id,
+    });
+    if (existingRazorpayOrder) {
+      console.log(
+        "[verifyPaymentAndPlaceOrder] ⚡️ Order already exists for:",
+        razorpay_order_id
+      );
+      return res.status(200).json({
+        message: "Order already placed",
+        order: await Order.findById(existingRazorpayOrder._id)
+          .populate("billingAddress")
+          .populate("items.product"),
+      });
     }
 
     const userId = req.userId;
@@ -193,7 +211,8 @@ export const verifyPaymentAndPlaceOrder = async (req, res) => {
       shippingCharge,
       null,
       coinsUsed,
-      "pending"
+      "pending",
+      cartItems
     );
     order.razorpayOrderId = razorpay_order_id;
     order.razorpayPaymentId = razorpay_payment_id;
@@ -262,280 +281,353 @@ export const redeemCoins = async (req, res) => {
 };
 
 export const handleRazorpayWebhook = async (req, res) => {
-  try {
-    console.log("webhook is running");
-    const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY = 1000; // 1 second
 
-    if (!req.body) {
-      console.error("No raw body found.");
-      return res.status(400).send("No raw body.");
-    }
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-    const signature = req.headers["x-razorpay-signature"];
-
-    const generatedSignature = crypto
-      .createHmac("sha256", secret)
-      .update(req.body)
-      .digest("hex");
-
-    if (generatedSignature !== signature) {
-      console.error("[Razorpay Webhook]  Invalid signature.", {
-        received: signature,
-        expected: generatedSignature,
-        bodyLength: req.body.length,
-      });
-      return res.status(400).send("Invalid signature");
-    }
-
-    const event = JSON.parse(req.body.toString());
-    console.log("[Razorpay Webhook] Event received:", event.event);
-
-    if (event.event !== "payment.captured") {
-      console.log(`[Razorpay Webhook] Not handling event: ${event.event}`);
-      return res.status(200).json({ received: true });
-    }
-
-    const payment = event.payload.payment.entity;
-    console.log("[Razorpay Webhook] Processing payment:", payment.id);
-
-    if (!payment.notes) {
-      console.error(
-        "[Razorpay Webhook]  No payment.notes found for payment:",
-        payment.id
-      );
-      return res.status(400).send("Missing notes");
-    }
-
-    const { userId, coinsUsed, billingAddressId } = payment.notes;
-    console.log("[Razorpay Webhook] Payment notes:", {
-      userId,
-      coinsUsed,
-      billingAddressId,
-    });
-
-    if (!userId || !billingAddressId) {
-      console.error("[Razorpay Webhook]  Missing required fields in notes:", {
-        userId,
-        billingAddressId,
-      });
-      return res.status(400).send("Missing userId or billingAddressId");
-    }
-
-    // Check if order already exists for this payment
-    const existingOrder = await Order.findOne({ paymentId: payment.id });
-    if (existingOrder) {
-      console.log(
-        "[Razorpay Webhook]  Order already exists for payment:",
-        payment.id,
-        "Order ID:",
-        existingOrder._id
-      );
-      return res
-        .status(200)
-        .json({ received: true, orderId: existingOrder._id });
-    }
-
-    const user = await User.findById(userId);
-    if (!user) {
-      console.error("[Razorpay Webhook]  User not found:", userId);
-      return res.status(404).send("User not found");
-    }
-
-    let address = await Address.findById(billingAddressId);
-    if (!address) {
-      console.error("[Razorpay Webhook]  Address not found:", billingAddressId);
-      return res.status(404).send("Address not found");
-    }
-
-    if (!address.user) {
-      address.user = userId;
-      await address.save();
-    }
-
-    const cartItems = await getCartItems(user._id);
-    if (!cartItems || cartItems.length === 0) {
-      console.error(
-        "[Razorpay Webhook]  Cart is empty for user:",
-        userId,
-        "at webhook processing time"
-      );
-      console.error(
-        "[Razorpay Webhook] This might be a timing issue - frontend cleared cart before webhook processed"
-      );
-      return res.status(400).send("Cart is empty");
-    }
-
-    console.log(
-      "[Razorpay Webhook] Cart items found:",
-      cartItems.length,
-      "items"
-    );
-
-    const totalAmount = cartItems.reduce(
-      (total, item) => total + item.price * item.quantity,
-      0
-    );
-    const inKerala = isKerala(address);
-    const shippingCharge = calculateShippingCharge(cartItems, inKerala);
-    const coinsUsedAmount = Number(coinsUsed) || 0;
-
-    const grandTotal = totalAmount + shippingCharge - coinsUsedAmount;
-    console.log("[Razorpay Webhook] Order totals:", {
-      totalAmount,
-      shippingCharge,
-      coinsUsedAmount,
-      grandTotal,
-    });
-
-    const session = await mongoose.startSession();
-    session.startTransaction();
-
+  const processWebhook = async (attempt = 1) => {
     try {
-      const orderNumber = generateOrderNumber();
       console.log(
-        "[Razorpay Webhook] Creating order with number:",
-        orderNumber
+        `[Razorpay Webhook] Processing attempt ${attempt}/${MAX_RETRIES}`
       );
 
-      const customOrder = await placeOrder(
-        user._id.toString(),
-        billingAddressId,
-        shippingCharge,
-        session,
-        coinsUsedAmount,
-        "pending",
-        orderNumber
-      );
+      const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
 
-      if (!customOrder) {
-        throw new Error("Failed to create order in placeOrder function");
+      if (!req.body) {
+        console.error("[Razorpay Webhook] No raw body found.");
+        return res.status(400).send("No raw body.");
       }
 
-      customOrder.razorpayOrderId = payment.order_id;
-      customOrder.paymentId = payment.id;
-      customOrder.paymentStatus = "paid";
-      customOrder.status = "pending";
+      const signature = req.headers["x-razorpay-signature"];
+      const generatedSignature = crypto
+        .createHmac("sha256", secret)
+        .update(req.body)
+        .digest("hex");
 
-      console.log("[Razorpay Webhook] Order created with ID:", customOrder._id);
-
-      if (coinsUsedAmount > 0) {
-        console.log(
-          "[Razorpay Webhook] Deducting coins:",
-          coinsUsedAmount,
-          "from user"
-        );
-        user.coins -= coinsUsedAmount;
-        await user.save({ session });
-      }
-
-      await customOrder.save({ session });
-
-      // Commit transaction before doing external operations
-      await session.commitTransaction();
-      console.log("[Razorpay Webhook]  Transaction committed successfully");
-
-      const populatedOrder = await Order.findById(customOrder._id)
-        .populate("billingAddress")
-        .populate("items.product");
-
-      if (!populatedOrder) {
-        throw new Error("Failed to populate order after creation");
-      }
-
-      // ===================
-      //  PDF Generation
-      // ===================
-      try {
-        console.log(
-          "[Razorpay Webhook] Generating PDF for order:",
-          populatedOrder._id
-        );
-        const pdfBuffer = await generatePdfBuffer({
-          order: populatedOrder,
-          shippingCharge,
-          coinsUsed: coinsUsedAmount,
-          payableAmount: grandTotal,
+      if (generatedSignature !== signature) {
+        console.error("[Razorpay Webhook] Invalid signature.", {
+          received: signature,
+          expected: generatedSignature,
         });
-        populatedOrder.pdfInvoice = pdfBuffer;
-        populatedOrder.pdfInvoiceMimeType = "application/pdf";
-        await populatedOrder.save();
-        console.log("[Razorpay Webhook]  PDF generated and saved");
-      } catch (pdfError) {
-        console.error("[Razorpay Webhook]  PDF generation failed:", pdfError);
+        return res.status(400).send("Invalid signature");
       }
 
-      // ===================
-      // Email Sending
-      // ===================
+      const event = JSON.parse(req.body.toString());
+      console.log("[Razorpay Webhook] Event received:", event.event);
+
+      if (event.event !== "payment.captured") {
+        console.log(`[Razorpay Webhook] Not handling event: ${event.event}`);
+        return res.status(200).json({ received: true });
+      }
+
+      const payment = event.payload.payment.entity;
+
+      if (!payment.notes) {
+        console.error("[Razorpay Webhook] No payment.notes found:", payment.id);
+        return res.status(400).send("Missing notes");
+      }
+
+      const {
+        userId,
+        coinsUsed,
+        billingAddressId,
+        cartItems: cartItemsStr,
+      } = payment.notes;
+
+      if (!userId || !billingAddressId) {
+        console.error("[Razorpay Webhook] Missing required fields:", {
+          userId,
+          billingAddressId,
+        });
+        return res.status(400).send("Missing userId or billingAddressId");
+      }
+
+      // Parse cart items from notes
+      let cartItems;
       try {
-        if (!populatedOrder.emailSent) {
-          await sendOrderConfirmationEmail(
-            populatedOrder.billingAddress.email,
-            populatedOrder
-          );
-          populatedOrder.emailSent = true;
-          await populatedOrder.save();
-        } else {
-          console.log("Email already send");
-        }
-      } catch (emailError) {
-        console.error("[Razorpay Webhook]  Error sending email:", emailError);
-      }
-
-      // ===================
-      //  Reward user
-      // ===================
-      try {
-        user.coins += 10;
-        await user.save();
-        console.log("[Razorpay Webhook]  Rewarded user with 10 coins");
-      } catch (rewardError) {
-        console.error("[Razorpay Webhook]  Error rewarding user:", rewardError);
-      }
-
-      console.log(
-        "[Razorpay Webhook]  Order processed successfully:",
-        customOrder._id
-      );
-      return res.status(200).json({
-        received: true,
-        orderId: customOrder._id,
-        orderNumber: customOrder.orderNumber,
-      });
-    } catch (error) {
-      console.error("[Razorpay Webhook]  Transaction error:", error);
-      if (session?.inTransaction?.()) {
-        try {
-          await session.abortTransaction();
-          console.log("[Razorpay Webhook] Transaction aborted");
-        } catch (abortError) {
-          console.error(
-            "[Razorpay Webhook] Error aborting transaction:",
-            abortError
-          );
-        }
-      }
-
-      // Check if order was actually created despite the error
-      const orderCheck = await Order.findOne({ paymentId: payment.id });
-      if (orderCheck) {
-        console.log(
-          "[Razorpay Webhook] ⚡️ Order exists despite transaction error:",
-          orderCheck._id
+        cartItems = cartItemsStr ? JSON.parse(cartItemsStr) : [];
+      } catch (parseError) {
+        console.error(
+          "[Razorpay Webhook] Error parsing cart items:",
+          parseError
         );
-        return res
-          .status(200)
-          .json({ received: true, orderId: orderCheck._id });
+        return res.status(400).send("Invalid cart items data");
       }
 
-      return res.status(500).send("Internal Server Error");
-    } finally {
-      if (session) {
-        session.endSession();
+      if (!cartItems || cartItems.length === 0) {
+        console.error(
+          "[Razorpay Webhook] No cart items found in payment notes"
+        );
+        return res.status(400).send("Cart items missing from payment notes");
       }
+
+      console.group("[Razorpay Webhook] Payment Context");
+      console.log({
+        paymentId: payment.id,
+        userId,
+        billingAddressId,
+        coinsUsed,
+        cartItemsCount: cartItems.length,
+        attempt,
+      });
+      console.groupEnd();
+
+      // Check if order already created (idempotency check)
+      const existingRazorpayOrder = await Order.findOne({
+        razorpayOrderId: payment.order_id,
+      });
+      if (existingRazorpayOrder) {
+        console.log(
+          "[Razorpay Webhook] ⚡️ Order already exists:",
+          payment.order_id
+        );
+        return res.status(200).json({
+          received: true,
+          orderId: existingRazorpayOrder._id,
+          status: "already_processed",
+        });
+      }
+
+      // Also check by payment ID (additional safety)
+      const existingPaymentOrder = await Order.findOne({
+        paymentId: payment.id,
+      });
+      if (existingPaymentOrder) {
+        console.log(
+          "[Razorpay Webhook] ⚡️ Order with payment ID already exists:",
+          payment.id
+        );
+        return res.status(200).json({
+          received: true,
+          orderId: existingPaymentOrder._id,
+          status: "already_processed",
+        });
+      }
+
+      const user = await User.findById(userId);
+      if (!user) {
+        console.error("[Razorpay Webhook] User not found:", userId);
+        return res.status(404).send("User not found");
+      }
+
+      const address = await Address.findById(billingAddressId);
+      if (!address) {
+        console.error(
+          "[Razorpay Webhook] Address not found:",
+          billingAddressId
+        );
+        return res.status(404).send("Address not found");
+      }
+
+      if (!address.user) {
+        address.user = userId;
+        await address.save();
+      }
+
+      const totalAmount = cartItems.reduce(
+        (t, item) => t + item.price * item.quantity,
+        0
+      );
+      const inKerala = isKerala(address);
+      const shippingCharge = calculateShippingCharge(cartItems, inKerala);
+      const coinsUsedAmount = Number(coinsUsed) || 0;
+      const grandTotal = totalAmount + shippingCharge - coinsUsedAmount;
+
+      console.group("[Razorpay Webhook] Totals");
+      console.log({ totalAmount, shippingCharge, coinsUsedAmount, grandTotal });
+      console.groupEnd();
+
+      const session = await mongoose.startSession();
+      session.startTransaction();
+
+      try {
+        const orderNumber = generateOrderNumber();
+        console.log(
+          `[Razorpay Webhook] Creating order: ${orderNumber} (attempt ${attempt})`
+        );
+
+        const customOrder = await placeOrder(
+          user._id,
+          billingAddressId,
+          shippingCharge,
+          session,
+          coinsUsedAmount,
+          "paid",
+          orderNumber,
+          cartItems,
+          {
+            razorpayOrderId: payment.order_id,
+            paymentId: payment.id,
+          }
+        );
+
+        if (!customOrder) {
+          throw new Error("Failed to create order");
+        }
+
+        if (coinsUsedAmount > 0) {
+          user.coins -= coinsUsedAmount;
+          await user.save({ session });
+        }
+
+        await session.commitTransaction();
+
+        const populatedOrder = await Order.findById(customOrder._id)
+          .populate("billingAddress")
+          .populate("items.product");
+
+        // ===================
+        // PDF Generation (non-blocking)
+        // ===================
+        setImmediate(async () => {
+          try {
+            const pdfBuffer = await generatePdfBuffer({
+              order: populatedOrder,
+              shippingCharge,
+              coinsUsed: coinsUsedAmount,
+              payableAmount: grandTotal,
+            });
+            populatedOrder.pdfInvoice = pdfBuffer;
+            populatedOrder.pdfInvoiceMimeType = "application/pdf";
+            await populatedOrder.save();
+            console.log(
+              `[Razorpay Webhook] PDF generated for order: ${customOrder.orderNumber}`
+            );
+          } catch (pdfError) {
+            console.error(
+              "[Razorpay Webhook] PDF generation failed:",
+              pdfError
+            );
+          }
+        });
+
+        // ===================
+        // Email Sending (non-blocking)
+        // ===================
+        setImmediate(async () => {
+          try {
+            if (!populatedOrder.emailSent) {
+              await sendOrderConfirmationEmail(
+                populatedOrder.billingAddress.email,
+                populatedOrder
+              );
+              populatedOrder.emailSent = true;
+              await populatedOrder.save();
+              console.log(
+                `[Razorpay Webhook] Email sent for order: ${customOrder.orderNumber}`
+              );
+            }
+          } catch (emailError) {
+            console.error(
+              "[Razorpay Webhook] Error sending email:",
+              emailError
+            );
+          }
+        });
+
+        // ===================
+        // Reward user (non-blocking)
+        // ===================
+        setImmediate(async () => {
+          try {
+            user.coins += 10;
+            await user.save();
+            console.log(`[Razorpay Webhook] User rewarded: ${userId}`);
+          } catch (rewardError) {
+            console.error(
+              "[Razorpay Webhook] Error rewarding user:",
+              rewardError
+            );
+          }
+        });
+
+        console.log(
+          `[Razorpay Webhook] ✅ Order created successfully: ${customOrder.orderNumber}`
+        );
+        return res.status(200).json({
+          received: true,
+          orderId: customOrder._id,
+          orderNumber: customOrder.orderNumber,
+          status: "created",
+          attempt,
+        });
+      } catch (error) {
+        console.error(
+          `[Razorpay Webhook] Transaction error (attempt ${attempt}):`,
+          error
+        );
+        if (session?.inTransaction?.()) {
+          await session.abortTransaction();
+        }
+
+        // Check if order was created by another process/webhook
+        const orderCheck = await Order.findOne({ paymentId: payment.id });
+        if (orderCheck) {
+          console.log(
+            "[Razorpay Webhook] Order found in final check, returning success"
+          );
+          return res.status(200).json({
+            received: true,
+            orderId: orderCheck._id,
+            status: "found_existing",
+          });
+        }
+
+        // If this is a retryable error and we haven't exhausted retries
+        if (attempt < MAX_RETRIES && isRetryableError(error)) {
+          console.log(`[Razorpay Webhook] Retrying in ${RETRY_DELAY}ms...`);
+          await sleep(RETRY_DELAY * attempt); // Exponential backoff
+          return processWebhook(attempt + 1);
+        }
+
+        throw error; // Re-throw if no more retries
+      } finally {
+        if (session) {
+          session.endSession();
+        }
+      }
+    } catch (error) {
+      if (attempt < MAX_RETRIES && isRetryableError(error)) {
+        console.error(
+          `[Razorpay Webhook] Error on attempt ${attempt}, retrying:`,
+          error.message
+        );
+        await sleep(RETRY_DELAY * attempt);
+        return processWebhook(attempt + 1);
+      }
+
+      console.error(
+        `[Razorpay Webhook] Final error after ${attempt} attempts:`,
+        error
+      );
+      throw error;
     }
+  };
+
+  // Helper function to determine if error is retryable
+  const isRetryableError = (error) => {
+    const retryableErrors = [
+      "ECONNRESET",
+      "ETIMEDOUT",
+      "ENOTFOUND",
+      "MongoNetworkError",
+      "MongoTimeoutError",
+      "VersionError", // MongoDB optimistic concurrency
+    ];
+
+    return retryableErrors.some(
+      (retryableError) =>
+        error.name?.includes(retryableError) ||
+        error.message?.includes(retryableError) ||
+        error.code === 11000 // Duplicate key error
+    );
+  };
+
+  try {
+    await processWebhook();
   } catch (error) {
-    console.error("[Razorpay Webhook]  Error:", error);
+    console.error("[Razorpay Webhook] All retry attempts failed:", error);
     return res.status(500).send("Internal Server Error");
   }
 };

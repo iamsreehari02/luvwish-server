@@ -14,7 +14,8 @@ export const createOrder = async (
   finalAmount,
   userId,
   coinsUsed,
-  billingAddressId
+  billingAddressId,
+  cartItems // Add cartItems parameter
 ) => {
   const options = {
     amount: finalAmount,
@@ -24,6 +25,7 @@ export const createOrder = async (
       userId: userId.toString(),
       coinsUsed: coinsUsed.toString(),
       billingAddressId: billingAddressId.toString(),
+      cartItems: JSON.stringify(cartItems), // Store cart items in notes
     },
   };
   const order = await razorpayInstance.orders.create(options);

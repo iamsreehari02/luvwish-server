@@ -10,7 +10,7 @@ import { authenticateUser } from "../middleware/auth.js";
 const router = express.Router();
 
 router.post("/", authenticateUser, createRazorpayOrder);
-router.post("/verify", authenticateUser, verifyPaymentAndPlaceOrder);
+// router.post("/verify", authenticateUser, verifyPaymentAndPlaceOrder);
 router.post("/redeem", authenticateUser, redeemCoins);
 router.get("/status/:orderId", getPaymentStatus);
 
